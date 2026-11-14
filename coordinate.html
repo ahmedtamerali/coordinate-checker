@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <!-- Prevents zooming and locks viewport on iPad Safari -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>Braille Tactile Touch Tracker</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      -webkit-user-select: none;
+      user-select: none;
+      -webkit-touch-callout: none;
+    }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: #0f172a;
+      color: #f8fafc;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+      touch-action: none; /* Disables browser pan/zoom gestures */
+    }
+
+    #touch-canvas {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      z-index: 1;
+    }
+
+    /* Floating HUD panel in top corner */
+    #hud {
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      z-index: 10;
+      background: rgba(15, 23, 42, 0.88);
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 14px 18px;
+      min-width: 270px;
+      backdrop-filter: blur(8px);
+      pointer-events: auto;
+    }
+
+    .hud-title {
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #94a3b8;
+      margin-bottom: 8px;
+    }
+
+    .coord-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 20px;
+      font-weight: 700;
+      margin-bottom: 6px;
+      color: #38bdf8;
+    }
+
+    .sub-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 13px;
+      color: #cbd5e1;
+      margin-bottom: 10px;
+    }
+
+    .esp-bar {
+      display: flex;
+      gap: 6px;
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1px solid #334155;
+    }
+
+    input[type="text"] {
+      flex: 1;
+      background: #1e293b;
+      border: 1px solid #475569;
+      border-radius: 6px;
+      color: #f8fafc;
+      padding: 6px 8px;
+      font-size: 12px;
+      -webkit-user-select: text;
+      user-select: text;
+    }
+
+    button {
+      background: #2563eb;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      padding: 6px 10px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    button.secondary {
+      background: #334155;
+    }
+
+    #status {
+      font-size: 11px;
+      color: #94a3b8;
+      margin-top: 6px;
+    }
+
+    /* Recorded points log (bottom-left) */
+    #log-panel {
+      position: fixed;
+      bottom: 16px;
+      left: 16px;
+      z-index: 10;
+      background: rgba(15, 23, 42, 0.88);
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 10px 14px;
+      max-width: 340px;
+      max-height: 180px;
+      overflow-y: auto;
+      font-size: 12px;
+    }
+
+    .log-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+      gap: 10px;
+    }
+
+    #log-list {
+      margin: 0;
+      padding-left: 16px;
+      color: #e2e8f0;
+    }
+  </style>
+</head>
+<body>
+
+  <canvas id="touch-canvas"></canvas>
+
+  <div id="hud">
+    <div class="hud-title">Live Touch Coordinates</div>
+    <div class="coord-row">
+      <span>X: <span id="val-x">0</span> px</span>
+      <span>Y: <span id="val-y">0</span> px</span>
+    </div>
+    <div class="sub-row">
+      <span>Normalized: (<span id="norm-x">0.000</span>, <span id="norm-y">0.000</span>)</span>
+      <span id="touch-state">Idle</span>
+    </div>
+
+    <div class="esp-bar">
+      <input type="text" id="esp-ip" value="http://192.168.4.1" placeholder="ESP32 URL" />
+      <button id="toggle-send" class="secondary">ESP Send: OFF</button>
+    </div>
+    <div id="status">Tap anywhere on the screen to capture coordinates.</div>
+  </div>
+
+  <div id="log-panel">
+    <div class="log-header">
+      <strong>Captured Points (for Mapping)</strong>
+      <div>
+        <button id="copy-json" class="secondary">Copy JSON</button>
+        <button id="clear-log" class="secondary">Clear</button>
+      </div>
+    </div>
+    <ol id="log-list"></ol>
+  </div>
+
+  <script>
+    const canvas = document.getElementById("touch-canvas");
+    const ctx = canvas.getContext("2d");
+
+    const valX = document.getElementById("val-x");
+    const valY = document.getElementById("val-y");
+    const normX = document.getElementById("norm-x");
+    const normY = document.getElementById("norm-y");
+    const touchState = document.getElementById("touch-state");
+    const statusEl = document.getElementById("status");
+    const logList = document.getElementById("log-list");
+    const espIpInput = document.getElementById("esp-ip");
+    const toggleSendBtn = document.getElementById("toggle-send");
+
+    let sendToEsp = false;
+    let lastTouch = null;
+    let capturedPoints = [];
+
+    // Resize canvas cleanly for Retina displays
+    function resizeCanvas() {
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = window.innerWidth * dpr;
+      canvas.height = window.innerHeight * dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      drawOverlay();
+    }
+
+    window.addEventListener("resize", resizeCanvas);
+
+    // Draw grid + A5 reference outline + crosshairs
+    function drawOverlay() {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      ctx.clearRect(0, 0, w, h);
+
+      // Subtle 50px grid
+      ctx.strokeStyle = "#1e293b";
+      ctx.lineWidth = 1;
+      for (let x = 0; x < w; x += 50) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, h);
+        ctx.stroke();
+      }
+      for (let y = 0; y < h; y += 50) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(w, y);
+        ctx.stroke();
+      }
+
+      // Draw saved calibration/braille points
+      capturedPoints.forEach((pt, idx) => {
+        ctx.fillStyle = "rgba(56, 189, 248, 0.25)";
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, 18, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = "#38bdf8";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        ctx.fillStyle = "#f8fafc";
+        ctx.font = "bold 12px monospace";
+        ctx.fillText(`#${idx + 1}`, pt.x + 12, pt.y - 12);
+      });
+
+      // Draw active touch crosshair
+      if (lastTouch) {
+        const { x, y } = lastTouch;
+        ctx.strokeStyle = "#f43f5e";
+        ctx.lineWidth = 1.5;
+
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(w, y);
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, h);
+        ctx.stroke();
+
+        ctx.fillStyle = "#f43f5e";
+        ctx.beginPath();
+        ctx.arc(x, y, 10, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    async function forwardToEsp(x, y, nx, ny) {
+      if (!sendToEsp) return;
+      const baseUrl = espIpInput.value.trim().replace(/\/$/, "");
+      const url = `${baseUrl}/touch?x=${x}&y=${y}&nx=${nx}&ny=${ny}`;
+      try {
+        const res = await fetch(url, { mode: "no-cors" });
+        statusEl.textContent = `Sent (${x}, ${y}) -> ESP32`;
+      } catch (err) {
+        statusEl.textContent = `ESP32 unreachable: ${err.message}`;
+      }
+    }
+
+    function handleTouch(e, phase) {
+      // Ignore touches inside HUD or Log panels
+      if (e.target.closest("#hud") || e.target.closest("#log-panel")) return;
+      e.preventDefault();
+
+      if (e.touches.length === 0) {
+        touchState.textContent = "Released";
+        return;
+      }
+
+      // Uses the primary touch point (ignores extra resting fingers)
+      const touch = e.touches[0];
+      const x = Math.round(touch.clientX);
+      const y = Math.round(touch.clientY);
+      const nx = (x / window.innerWidth).toFixed(3);
+      const ny = (y / window.innerHeight).toFixed(3);
+
+      valX.textContent = x;
+      valY.textContent = y;
+      normX.textContent = nx;
+      normY.textContent = ny;
+      touchState.textContent = phase;
+
+      lastTouch = { x, y };
+      drawOverlay();
+
+      if (phase === "Pressed") {
+        capturedPoints.push({ id: capturedPoints.length + 1, x, y, nx: Number(nx), ny: Number(ny) });
+        const li = document.createElement("li");
+        li.textContent = `Dot #${capturedPoints.length}: X=${x}, Y=${y}`;
+        logList.appendChild(li);
+        logList.scrollTop = logList.scrollHeight;
+
+        forwardToEsp(x, y, nx, ny);
+      }
+    }
+
+    canvas.addEventListener("touchstart", (e) => handleTouch(e, "Pressed"), { passive: false });
+    canvas.addEventListener("touchmove", (e) => handleTouch(e, "Moving"), { passive: false });
+    canvas.addEventListener("touchend", (e) => handleTouch(e, "Released"), { passive: false });
+
+    // Toggle ESP32 HTTP forwarding
+    toggleSendBtn.addEventListener("click", () => {
+      sendToEsp = !sendToEsp;
+      toggleSendBtn.textContent = sendToEsp ? "ESP Send: ON" : "ESP Send: OFF";
+      toggleSendBtn.style.background = sendToEsp ? "#16a34a" : "#334155";
+      statusEl.textContent = sendToEsp
+        ? `Streaming touches to ${espIpInput.value}`
+        : "ESP32 streaming paused.";
+    });
+
+    // Copy captured coordinates as JSON for your ESP32 firmware
+    document.getElementById("copy-json").addEventListener("click", () => {
+      const jsonStr = JSON.stringify(capturedPoints, null, 2);
+      navigator.clipboard.writeText(jsonStr);
+      statusEl.textContent = "Copied coordinates JSON to clipboard!";
+    });
+
+    // Clear recorded points
+    document.getElementById("clear-log").addEventListener("click", () => {
+      capturedPoints = [];
+      logList.innerHTML = "";
+      lastTouch = null;
+      drawOverlay();
+      statusEl.textContent = "Cleared points.";
+    });
+
+    resizeCanvas();
+  </script>
+</body>
+</html>
